@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import io
 import json
+import re
 from datetime import datetime, timedelta
 
 # --- PAGE SETUP ---
@@ -57,19 +58,22 @@ def upload_binary(file_bytes, file_path):
     try:
         token = get_access_token()
         if not token: return False
+        
+        # Dropbox requires strict ASCII for the header path
+        api_arg = json.dumps({"path": file_path, "mode": "overwrite"}).encode('ascii', 'ignore').decode('ascii')
         headers = {
             "Authorization": f"Bearer {token}",
-            "Dropbox-API-Arg": json.dumps({"path": file_path, "mode": "overwrite"}),
+            "Dropbox-API-Arg": api_arg,
             "Content-Type": "application/octet-stream"
         }
         res = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_bytes)
         if res.status_code == 200:
             return True
         else:
-            st.error(f"Dropbox Error: {res.text}")
+            st.error(f"Dropbox Error: Could not upload file. Ensure it is a valid format.")
             return False
     except Exception as e:
-        st.error(f"Upload Error: {str(e)}")
+        st.error("Upload Error: Connection interrupted.")
         return False
 
 def get_temp_link(file_path):
@@ -224,7 +228,7 @@ else:
                     upload_file(json.dumps(st.session_state.settings), SETTINGS_PATH)
                     st.success("✅ PINs updated securely!")
                 
-    st.sidebar.caption("Software Version: v2.0")
+    st.sidebar.caption("Software Version: v2.1")
 
     # --- MAIN APP TITLE ---
     st.title("⚓ Accounts")
@@ -259,9 +263,9 @@ else:
         receipt_status = "No"
         if receipt_file is not None:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            s_item = "".join([c for c in item if c.isalnum() or c==' ']).rstrip()
-            ext = receipt_file.name.split('.')[-1]
-            dbx_path = f"/Receipts/{vessel}/{ts}_{s_item}.{ext}"
+            ext = receipt_file.name.split('.')[-1].lower()
+            safe_vessel = re.sub(r'[^A-Za-z0-9]', '_', vessel)
+            dbx_path = f"/Receipts/{safe_vessel}/Receipt_{ts}.{ext}"
             
             with st.spinner("Uploading receipt to secure cloud..."):
                 if upload_binary(receipt_file.getvalue(), dbx_path):
@@ -342,7 +346,7 @@ else:
         df_display["Receipt"] = df_display["Receipt"].apply(clean_receipt_status)
         df_display.insert(0, "Select", False) 
         
-        st.info("💡 Tick the top-left box to select all on this page. Tick individual rows to Edit, Delete, or Attach Bills.")
+        st.info("💡 Tick the top-left box to select all on this page. Tick individual rows to Edit, Move, Delete, or Attach Bills.")
         edited_df = st.data_editor(df_display, hide_index=True, use_container_width=True, disabled=v_data.columns.tolist(), key="editor")
         
         selected_ids = edited_df[edited_df["Select"]]["ID"].tolist()
@@ -351,19 +355,20 @@ else:
             st.divider()
             st.write(f"### ⚙️ Actions for Selected ({len(selected_ids)} items)")
             
-            # --- EDIT LOGIC (1 ITEM) ---
+            # --- EDIT & MOVE LOGIC (1 ITEM ONLY) ---
             if len(selected_ids) == 1:
                 edit_id = selected_ids[0]
                 row_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == edit_id].tolist()[0]
                 row_data = st.session_state.expenses.iloc[row_idx]
                 
+                # Edit Content
                 c1, c2 = st.columns(2)
                 with c1: 
                     new_item = st.text_input("Edit Description Text", value=str(row_data['Item']), key="ed_item")
                     new_amt = st.number_input("Edit Amount (₹)", value=float(row_data['Amount']), key="ed_amt")
                 with c2:
                     st.write(""); st.write("") 
-                    if st.button("💾 Update Entry", key="btn_upd"):
+                    if st.button("💾 Update Entry Details", key="btn_upd"):
                         old_amt = float(row_data['Amount'])
                         old_txt = str(row_data['Item'])
                         st.session_state.wallets[row_data['Paid By']] += old_amt 
@@ -375,7 +380,40 @@ else:
                         write_audit("EDIT", edit_id, f"Changed '{old_txt}' (₹{old_amt}) to '{new_item}' (₹{new_amt})")
                         st.success("Entry Updated!"); st.rerun()
 
-                # --- VIEW RECEIPT LOGIC ---
+                # Transfer / Duplicate Vessel (Master Only)
+                if st.session_state.user_role == "Master":
+                    st.write("#### 🔄 Transfer or Duplicate Entry")
+                    t_col1, t_col2 = st.columns(2)
+                    with t_col1: 
+                        target_vessel = st.selectbox("Select Target Vessel", st.session_state.vessels, key="target_vessel")
+                    with t_col2:
+                        st.write("")
+                        ca, cb = st.columns(2)
+                        with ca:
+                            if st.button("🚚 Move to Vessel", key="btn_move"):
+                                old_vessel = row_data['Vessel']
+                                if old_vessel != target_vessel:
+                                    st.session_state.expenses.at[row_idx, 'Vessel'] = target_vessel
+                                    upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
+                                    write_audit("MOVE", edit_id, f"Moved from {old_vessel} to {target_vessel}")
+                                    st.success(f"Successfully moved to {target_vessel}!"); st.rerun()
+                                else:
+                                    st.warning("Entry is already in this vessel.")
+                        with cb:
+                            if st.button("📋 Duplicate Entry", key="btn_dup"):
+                                new_row = row_data.copy()
+                                new_row['Vessel'] = target_vessel
+                                new_row['ID'] = 0 
+                                # Deduct wallet for the duplicated expense
+                                st.session_state.wallets[new_row['Paid By']] -= float(new_row['Amount'])
+                                upload_file(pd.DataFrame(list(st.session_state.wallets.items()), columns=["Person", "Balance"]).to_csv(index=False), WALLETS_PATH)
+                                st.session_state.expenses = pd.concat([st.session_state.expenses, pd.DataFrame([new_row])], ignore_index=True)
+                                reshuffle_ids()
+                                upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
+                                write_audit("DUPLICATE", edit_id, f"Duplicated copy sent to {target_vessel}")
+                                st.success(f"Duplicated to {target_vessel}!"); st.rerun()
+
+                # View Receipt Logic
                 rcpt_val = str(row_data['Receipt'])
                 if rcpt_val not in ["No", "nan", "None", ""]:
                     st.divider()
@@ -404,7 +442,9 @@ else:
             bulk_receipt = st.file_uploader("Upload Bill (Applies to all selected)", type=["png", "jpg", "jpeg", "pdf"], key="bulk_rcpt")
             if st.button("Upload & Link Receipt", key="btn_link") and bulk_receipt:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                dbx_path = f"/Receipts/{current_vessel}/Bulk_{ts}.{bulk_receipt.name.split('.')[-1]}"
+                ext = bulk_receipt.name.split('.')[-1].lower()
+                safe_vessel = re.sub(r'[^A-Za-z0-9]', '_', current_vessel)
+                dbx_path = f"/Receipts/{safe_vessel}/Bulk_{ts}.{ext}"
                 
                 with st.spinner("Uploading file securely to Dropbox..."):
                     success = upload_binary(bulk_receipt.getvalue(), dbx_path)
