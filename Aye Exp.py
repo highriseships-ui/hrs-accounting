@@ -4,6 +4,7 @@ import requests
 import io
 import json
 import re
+import time
 from datetime import datetime, timedelta
 
 # --- PAGE SETUP ---
@@ -54,19 +55,21 @@ def upload_file(content, file_path):
     }
     requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=content.encode('utf-8'))
 
-def upload_binary(file_bytes, file_path):
+def upload_binary(file_obj, file_path):
+    # Streaming the file object directly avoids Out-Of-Memory (OOM) silent crashes for large PDFs!
     try:
         token = get_access_token()
         if not token: return False
         
-        # Dropbox requires strict ASCII for the header path
         api_arg = json.dumps({"path": file_path, "mode": "overwrite"}).encode('ascii', 'ignore').decode('ascii')
         headers = {
             "Authorization": f"Bearer {token}",
             "Dropbox-API-Arg": api_arg,
             "Content-Type": "application/octet-stream"
         }
-        res = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_bytes, timeout=60)
+        file_obj.seek(0) # Ensure we read from the beginning of the file
+        res = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_obj, timeout=120)
+        
         if res.status_code == 200:
             return True
         else:
@@ -210,6 +213,7 @@ else:
                 updated_hist = pd.concat([pd.read_csv(io.StringIO(old_hist_csv)), new_hist], ignore_index=True) if old_hist_csv else new_hist
                 upload_file(updated_hist.to_csv(index=False), WALLET_HISTORY_PATH)
                 st.success(f"Added ₹{fund_amount} to {fund_person}!")
+                time.sleep(1.5)
                 st.rerun()
 
         with st.sidebar.expander("⚙️ Admin Settings"):
@@ -228,7 +232,7 @@ else:
                     upload_file(json.dumps(st.session_state.settings), SETTINGS_PATH)
                     st.success("✅ PINs updated securely!")
                 
-    st.sidebar.caption("Software Version: v2.2")
+    st.sidebar.caption("Software Version: v2.3")
 
     # --- MAIN APP TITLE ---
     st.title("⚓ Accounts")
@@ -267,8 +271,8 @@ else:
             safe_vessel = re.sub(r'[^A-Za-z0-9]', '_', vessel)
             dbx_path = f"/Receipts/{safe_vessel}/Receipt_{ts}.{ext}"
             
-            with st.spinner("Uploading receipt to secure cloud..."):
-                if upload_binary(receipt_file.getvalue(), dbx_path):
+            with st.spinner("Uploading receipt to secure cloud. Please wait..."):
+                if upload_binary(receipt_file, dbx_path):
                     receipt_status = dbx_path
                 else:
                     st.error("Failed to upload the receipt. Saving entry without receipt.")
@@ -278,6 +282,8 @@ else:
         reshuffle_ids()
         upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
         st.success("Expense Saved Successfully!")
+        time.sleep(1.5)
+        st.rerun()
 
     def expense_form(category_name):
         with st.form(f"f_{category_name}", clear_on_submit=True):
@@ -363,7 +369,7 @@ else:
                     c1, c2 = st.columns(2)
                     with c1: new_item = st.text_input("Edit Description Text", value=str(row_data['Item']))
                     with c2: new_amt = st.number_input("Edit Amount (₹)", value=float(row_data['Amount']))
-                    if st.form_submit_button("💾 Update Entry"):
+                    if st.form_submit_button("💾 Update Entry Details"):
                         old_amt = float(row_data['Amount'])
                         old_txt = str(row_data['Item'])
                         st.session_state.wallets[row_data['Paid By']] += old_amt 
@@ -373,7 +379,9 @@ else:
                         st.session_state.expenses.at[row_idx, 'Amount'] = new_amt
                         upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
                         write_audit("EDIT", edit_id, f"Changed '{old_txt}' (₹{old_amt}) to '{new_item}' (₹{new_amt})")
-                        st.success("Entry Updated!"); st.rerun()
+                        st.success("Entry Updated!")
+                        time.sleep(1.5)
+                        st.rerun()
 
                 if st.session_state.user_role == "Master":
                     with st.form("transfer_form"):
@@ -388,7 +396,9 @@ else:
                                     st.session_state.expenses.at[row_idx, 'Vessel'] = target_vessel
                                     upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
                                     write_audit("MOVE", edit_id, f"Moved from {old_vessel} to {target_vessel}")
-                                    st.success(f"Successfully moved to {target_vessel}!"); st.rerun()
+                                    st.success(f"Successfully moved to {target_vessel}!")
+                                    time.sleep(1.5)
+                                    st.rerun()
                                 else:
                                     st.warning("Entry is already in this vessel.")
                             else:
@@ -401,7 +411,9 @@ else:
                                 reshuffle_ids()
                                 upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
                                 write_audit("DUPLICATE", edit_id, f"Duplicated copy sent to {target_vessel}")
-                                st.success(f"Duplicated to {target_vessel}!"); st.rerun()
+                                st.success(f"Duplicated to {target_vessel}!")
+                                time.sleep(1.5)
+                                st.rerun()
 
                 # View Receipt Logic
                 rcpt_val = str(row_data['Receipt'])
@@ -427,43 +439,44 @@ else:
                                     st.error("Could not fetch receipt. It may have been deleted from Dropbox.")
             
             # --- BULK RECEIPT UPLOAD ---
-            with st.form("bulk_receipt_form", clear_on_submit=True):
-                st.write("#### 📎 Attach Receipt to Selected")
-                bulk_receipt = st.file_uploader("Upload Bill (Applies to all selected)", type=["png", "jpg", "jpeg", "pdf"])
-                if st.form_submit_button("Upload & Link Receipt") and bulk_receipt:
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    ext = bulk_receipt.name.split('.')[-1].lower()
-                    safe_vessel = re.sub(r'[^A-Za-z0-9]', '_', current_vessel)
-                    dbx_path = f"/Receipts/{safe_vessel}/Bulk_{ts}.{ext}"
+            st.write("#### 📎 Attach Receipt to Selected")
+            bulk_receipt = st.file_uploader("Upload Bill (Applies to all selected)", type=["png", "jpg", "jpeg", "pdf"], key="bulk_rcpt")
+            if st.button("Upload & Link Receipt", key="btn_link") and bulk_receipt:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                ext = bulk_receipt.name.split('.')[-1].lower()
+                safe_vessel = re.sub(r'[^A-Za-z0-9]', '_', current_vessel)
+                dbx_path = f"/Receipts/{safe_vessel}/Bulk_{ts}.{ext}"
+                
+                with st.spinner("Uploading file securely to Dropbox. This may take a minute for PDFs..."):
+                    success = upload_binary(bulk_receipt, dbx_path)
                     
-                    with st.spinner("Uploading file securely to Dropbox..."):
-                        success = upload_binary(bulk_receipt.getvalue(), dbx_path)
-                        
-                    if success:
-                        for eid in selected_ids:
-                            st.session_state.expenses.at[st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0], 'Receipt'] = dbx_path
-                        upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
-                        write_audit("RECEIPT UPLOADED", str(selected_ids), "Attached receipt to selected rows.")
-                        st.success("Receipt successfully linked!")
-                        st.rerun()
+                if success:
+                    for eid in selected_ids:
+                        st.session_state.expenses.at[st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0], 'Receipt'] = dbx_path
+                    upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
+                    write_audit("RECEIPT UPLOADED", str(selected_ids), "Attached receipt to selected rows.")
+                    st.success("✅ Receipt successfully linked!")
+                    time.sleep(1.5)
+                    st.rerun()
 
             # --- DELETE SELECTED ---
-            with st.form("delete_form"):
-                st.write("#### 🗑️ Delete Selected")
-                if st.form_submit_button("Delete Entries Entirely", type="primary"):
-                    rows_to_drop = []
-                    for eid in selected_ids:
-                        r_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0]
-                        r_data = st.session_state.expenses.iloc[r_idx]
-                        st.session_state.wallets[r_data['Paid By']] += float(r_data['Amount']) 
-                        rows_to_drop.append(r_idx)
-                        write_audit("DELETE", eid, f"Deleted: '{r_data['Item']}' (₹{r_data['Amount']} paid by {r_data['Paid By']})")
-                    
-                    st.session_state.expenses = st.session_state.expenses.drop(rows_to_drop)
-                    reshuffle_ids() 
-                    upload_file(pd.DataFrame(list(st.session_state.wallets.items()), columns=["Person", "Balance"]).to_csv(index=False), WALLETS_PATH)
-                    upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
-                    st.error("Entries completely deleted, IDs reshuffled, and money refunded."); st.rerun()
+            st.write("#### 🗑️️ Delete Selected")
+            if st.button("Delete Entries Entirely", type="primary", key="btn_del"):
+                rows_to_drop = []
+                for eid in selected_ids:
+                    r_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0]
+                    r_data = st.session_state.expenses.iloc[r_idx]
+                    st.session_state.wallets[r_data['Paid By']] += float(r_data['Amount']) 
+                    rows_to_drop.append(r_idx)
+                    write_audit("DELETE", eid, f"Deleted: '{r_data['Item']}' (₹{r_data['Amount']} paid by {r_data['Paid By']})")
+                
+                st.session_state.expenses = st.session_state.expenses.drop(rows_to_drop)
+                reshuffle_ids() 
+                upload_file(pd.DataFrame(list(st.session_state.wallets.items()), columns=["Person", "Balance"]).to_csv(index=False), WALLETS_PATH)
+                upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
+                st.error("Entries completely deleted, IDs reshuffled, and money refunded.")
+                time.sleep(2)
+                st.rerun()
 
     # --- TAB LOGIC BASED ON ROLE ---
     if st.session_state.user_role == "Master":
@@ -480,7 +493,8 @@ else:
             b_paid = st.selectbox("Paid By", list(st.session_state.wallets.keys()), key="bp")
             receipt = st.file_uploader("Attach Bill", type=["png", "jpg", "jpeg", "pdf"], key="br")
             exp_str = st.date_input("Expiry Date").strftime("%Y-%m-%d") if st.checkbox("🔔 Set Expiry Date?") else None
-            if st.button("Save Billing", type="primary") and b_amt > 0 and act_item: save_expense(current_vessel, "Billings & Charges", act_item, b_paid, b_amt, exp_str, receipt)
+            if st.button("Save Billing", type="primary") and b_amt > 0 and act_item: 
+                save_expense(current_vessel, "Billings & Charges", act_item, b_paid, b_amt, exp_str, receipt)
             
             st.divider(); st.write(f"### 🚨 Active Alerts")
             with_exp = st.session_state.expenses[(st.session_state.expenses["Vessel"] == current_vessel) & (st.session_state.expenses["Expiry Date"].notna()) & (st.session_state.expenses["Expiry Date"] != "None") & (st.session_state.expenses["Expiry Date"] != "nan")]
@@ -488,7 +502,7 @@ else:
                 try:
                     dl = (datetime.strptime(str(row["Expiry Date"]), "%Y-%m-%d").date() - datetime.now().date()).days
                     if dl < 0: st.error(f"❌ **EXPIRED {-dl} days ago:** {row['Item']} - Expired {row['Expiry Date']}")
-                    elif dl <= 7: st.warning(f"⚠️️ **DUE SOON ({dl} days):** {row['Item']} - Expires {row['Expiry Date']}")
+                    elif dl <= 7: st.warning(f"⚠️ **DUE SOON ({dl} days):** {row['Item']} - Expires {row['Expiry Date']}")
                     else: st.success(f"✅ **Active ({dl} days left):** {row['Item']} - Expires {row['Expiry Date']}")
                 except: pass
 
@@ -519,7 +533,9 @@ else:
                             st.session_state.expenses = pd.concat([st.session_state.expenses, pd.DataFrame(new_rows)], ignore_index=True)
                             reshuffle_ids() 
                             upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
-                            st.success(f"✅ Imported {len(new_rows)} items totaling ₹{total_amt:,.2f} into {c_cat}!"); st.rerun()
+                            st.success(f"✅ Imported {len(new_rows)} items totaling ₹{total_amt:,.2f} into {c_cat}!")
+                            time.sleep(2)
+                            st.rerun()
                         else: st.error("Total amount is 0.")
                 except Exception as e: st.error(f"Error reading file: {e}")
                 
@@ -545,7 +561,8 @@ else:
             b_paid = st.selectbox("Paid By", ["Assistant"], key="bp_a")
             receipt = st.file_uploader("Attach Bill", type=["png", "jpg", "jpeg", "pdf"], key="br_a")
             exp_str = st.date_input("Expiry Date").strftime("%Y-%m-%d") if st.checkbox("🔔 Set Expiry Date?") else None
-            if st.button("Save Billing", type="primary") and b_amt > 0 and act_item: save_expense(current_vessel, "Billings & Charges", act_item, b_paid, b_amt, exp_str, receipt)
+            if st.button("Save Billing", type="primary") and b_amt > 0 and act_item: 
+                save_expense(current_vessel, "Billings & Charges", act_item, b_paid, b_amt, exp_str, receipt)
         with tabs[5]:
             st.write("### 📥 Bulk Import from Excel / CSV")
             c_cat = st.selectbox("📌 Select Target Category:", ["Maintenance & Repair", "Purchases (Spares)", "Transportation", "Billings & Charges"])
@@ -572,7 +589,9 @@ else:
                             st.session_state.expenses = pd.concat([st.session_state.expenses, pd.DataFrame(new_rows)], ignore_index=True)
                             reshuffle_ids() 
                             upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
-                            st.success(f"✅ Imported {len(new_rows)} items totaling ₹{total_amt:,.2f} into {c_cat}!"); st.rerun()
+                            st.success(f"✅ Imported {len(new_rows)} items totaling ₹{total_amt:,.2f} into {c_cat}!")
+                            time.sleep(2)
+                            st.rerun()
                         else: st.error("Total amount is 0.")
                 except Exception as e: st.error(f"Error reading file: {e}")
                 
