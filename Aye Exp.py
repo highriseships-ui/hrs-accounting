@@ -39,7 +39,7 @@ def get_access_token():
 def download_file(file_path):
     token = get_access_token()
     if not token: return None
-    headers = {"Authorization": f"Bearer {token}", "Dropbox-API-Arg": f'{{"path": "{file_path}"}}'}
+    headers = {"Authorization": f"Bearer {token}", "Dropbox-API-Arg": json.dumps({"path": file_path})}
     res = requests.post("https://content.dropboxapi.com/2/files/download", headers=headers)
     return res.text if res.status_code == 200 else None
 
@@ -48,20 +48,29 @@ def upload_file(content, file_path):
     if not token: return
     headers = {
         "Authorization": f"Bearer {token}",
-        "Dropbox-API-Arg": f'{{"path": "{file_path}","mode": "overwrite"}}',
+        "Dropbox-API-Arg": json.dumps({"path": file_path, "mode": "overwrite"}),
         "Content-Type": "application/octet-stream"
     }
     requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=content.encode('utf-8'))
 
 def upload_binary(file_bytes, file_path):
-    token = get_access_token()
-    if not token: return
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Dropbox-API-Arg": f'{{"path": "{file_path}","mode": "overwrite"}}',
-        "Content-Type": "application/octet-stream"
-    }
-    requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_bytes)
+    try:
+        token = get_access_token()
+        if not token: return False
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Dropbox-API-Arg": json.dumps({"path": file_path, "mode": "overwrite"}),
+            "Content-Type": "application/octet-stream"
+        }
+        res = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_bytes)
+        if res.status_code == 200:
+            return True
+        else:
+            st.error(f"Dropbox Error: {res.text}")
+            return False
+    except Exception as e:
+        st.error(f"Upload Error: {str(e)}")
+        return False
 
 def get_temp_link(file_path):
     token = get_access_token()
@@ -215,7 +224,7 @@ else:
                     upload_file(json.dumps(st.session_state.settings), SETTINGS_PATH)
                     st.success("✅ PINs updated securely!")
                 
-    st.sidebar.caption("Software Version: v1.9")
+    st.sidebar.caption("Software Version: v2.0")
 
     # --- MAIN APP TITLE ---
     st.title("⚓ Accounts")
@@ -253,8 +262,12 @@ else:
             s_item = "".join([c for c in item if c.isalnum() or c==' ']).rstrip()
             ext = receipt_file.name.split('.')[-1]
             dbx_path = f"/Receipts/{vessel}/{ts}_{s_item}.{ext}"
-            upload_binary(receipt_file.getvalue(), dbx_path)
-            receipt_status = dbx_path
+            
+            with st.spinner("Uploading receipt to secure cloud..."):
+                if upload_binary(receipt_file.getvalue(), dbx_path):
+                    receipt_status = dbx_path
+                else:
+                    st.error("Failed to upload the receipt. Saving entry without receipt.")
 
         new_row = pd.DataFrame([{"ID": 0, "Date": datetime.now().strftime("%Y-%m-%d"), "Vessel": vessel, "Category": category, "Item": item, "Paid By": paid_by, "Amount": amount, "Expiry Date": expiry_date, "Receipt": receipt_status, "Entered By": st.session_state.user_role}])
         st.session_state.expenses = pd.concat([st.session_state.expenses, new_row], ignore_index=True)
@@ -374,11 +387,17 @@ else:
                             with st.spinner("Fetching receipt from secure cloud..."):
                                 link = get_temp_link(rcpt_val)
                                 if link:
-                                    if rcpt_val.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                    ext = rcpt_val.split('.')[-1].lower()
+                                    if ext in ['png', 'jpg', 'jpeg']:
                                         st.image(link, caption="Receipt Image")
-                                    st.markdown(f"**[👉 Click Here to Download Full Size]({link})**")
+                                        st.markdown(f"**[👉 Click Here to Download Full Size Image]({link})**")
+                                    elif ext == 'pdf':
+                                        st.success("📄 PDF Document Ready!")
+                                        st.markdown(f"### [👉 Click Here to View / Download PDF]({link})")
+                                    else:
+                                        st.markdown(f"### [👉 Click Here to Download File]({link})")
                                 else:
-                                    st.error("Could not fetch receipt. It may have been deleted.")
+                                    st.error("Could not fetch receipt. It may have been deleted from Dropbox.")
             
             # --- BULK RECEIPT UPLOAD ---
             st.write("#### 📎 Attach Receipt to Selected")
@@ -386,12 +405,17 @@ else:
             if st.button("Upload & Link Receipt", key="btn_link") and bulk_receipt:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 dbx_path = f"/Receipts/{current_vessel}/Bulk_{ts}.{bulk_receipt.name.split('.')[-1]}"
-                upload_binary(bulk_receipt.getvalue(), dbx_path)
-                for eid in selected_ids:
-                    st.session_state.expenses.at[st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0], 'Receipt'] = dbx_path
-                upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
-                write_audit("RECEIPT UPLOADED", str(selected_ids), "Attached receipt to selected rows.")
-                st.success("Receipt successfully linked!"); st.rerun()
+                
+                with st.spinner("Uploading file securely to Dropbox..."):
+                    success = upload_binary(bulk_receipt.getvalue(), dbx_path)
+                    
+                if success:
+                    for eid in selected_ids:
+                        st.session_state.expenses.at[st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0], 'Receipt'] = dbx_path
+                    upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
+                    write_audit("RECEIPT UPLOADED", str(selected_ids), "Attached receipt to selected rows.")
+                    st.success("Receipt successfully linked!")
+                    st.rerun()
 
             st.write("#### 🗑️ Delete Selected")
             if st.button("Delete Entries Entirely", type="primary", key="btn_del"):
