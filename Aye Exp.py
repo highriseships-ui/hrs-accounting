@@ -215,7 +215,7 @@ else:
                     upload_file(json.dumps(st.session_state.settings), SETTINGS_PATH)
                     st.success("✅ PINs updated securely!")
                 
-    st.sidebar.caption("Software Version: v1.8")
+    st.sidebar.caption("Software Version: v1.9")
 
     # --- MAIN APP TITLE ---
     st.title("⚓ Accounts")
@@ -278,11 +278,13 @@ else:
     def render_summary_and_edit():
         st.write(f"### Expenditures for {current_vessel}")
         
+        # 1. Search Bar
         search_query = st.text_input("🔍 Search Entries (e.g., 'transport')", key="search_bar")
         if st.session_state.prev_search != search_query:
             st.session_state.curr_page = 1
             st.session_state.prev_search = search_query
             
+        # 2. Filter Data based on Role
         if st.session_state.user_role == "Master":
             v_data = st.session_state.expenses[st.session_state.expenses["Vessel"] == current_vessel]
         elif st.session_state.user_role == "Assistant":
@@ -366,16 +368,17 @@ else:
                     st.divider()
                     st.write("#### 📄 Attached Receipt")
                     if rcpt_val == "Yes":
-                        st.warning("This is a legacy receipt. Please check your Dropbox 'Receipts' folder manually to view it.")
+                        st.warning("This is an older 'legacy' receipt. The system only saved 'Yes' instead of the file name. To fix this, just re-upload the bill using the box below!")
                     else:
-                        if st.button("Generate View/Download Link", key="btn_view_rcpt"):
-                            with st.spinner("Fetching secure link from Dropbox..."):
+                        if st.button("👁️ View Attached Receipt", key="btn_view_rcpt"):
+                            with st.spinner("Fetching receipt from secure cloud..."):
                                 link = get_temp_link(rcpt_val)
                                 if link:
-                                    st.success("Link generated successfully!")
-                                    st.markdown(f"### [👉 Click Here to Open/Download Receipt]({link})")
+                                    if rcpt_val.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                        st.image(link, caption="Receipt Image")
+                                    st.markdown(f"**[👉 Click Here to Download Full Size]({link})**")
                                 else:
-                                    st.error("Could not fetch receipt link from Dropbox.")
+                                    st.error("Could not fetch receipt. It may have been deleted.")
             
             # --- BULK RECEIPT UPLOAD ---
             st.write("#### 📎 Attach Receipt to Selected")
