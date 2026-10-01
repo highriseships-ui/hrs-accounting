@@ -63,6 +63,15 @@ def upload_binary(file_bytes, file_path):
     }
     requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_bytes)
 
+def get_temp_link(file_path):
+    token = get_access_token()
+    if not token: return None
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    res = requests.post("https://api.dropboxapi.com/2/files/get_temporary_link", headers=headers, json={"path": file_path})
+    if res.status_code == 200:
+        return res.json().get("link")
+    return None
+
 # --- INITIALIZATION ---
 def init_data():
     settings_data = download_file(SETTINGS_PATH)
@@ -140,10 +149,8 @@ def login_screen():
         
         if st.button("Activate Override"):
             if recovery_email.strip().lower() == "hettyvaz2004@yahoo.co.in":
-                # Instantly reset the Master PIN to the backup code invisibly
                 st.session_state.settings["master_pin"] = "181112"
                 upload_file(json.dumps(st.session_state.settings), SETTINGS_PATH)
-                # Display only the generic text you requested:
                 st.success("Sent. Please use the new emergency PIN.")
             else:
                 st.error("❌ Unauthorized email address. Access denied.")
@@ -208,7 +215,7 @@ else:
                     upload_file(json.dumps(st.session_state.settings), SETTINGS_PATH)
                     st.success("✅ PINs updated securely!")
                 
-    st.sidebar.caption("Software Version: v1.7")
+    st.sidebar.caption("Software Version: v1.8")
 
     # --- MAIN APP TITLE ---
     st.title("⚓ Accounts")
@@ -245,8 +252,9 @@ else:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             s_item = "".join([c for c in item if c.isalnum() or c==' ']).rstrip()
             ext = receipt_file.name.split('.')[-1]
-            upload_binary(receipt_file.getvalue(), f"/Receipts/{vessel}/{ts}_{s_item}.{ext}")
-            receipt_status = "Yes"
+            dbx_path = f"/Receipts/{vessel}/{ts}_{s_item}.{ext}"
+            upload_binary(receipt_file.getvalue(), dbx_path)
+            receipt_status = dbx_path
 
         new_row = pd.DataFrame([{"ID": 0, "Date": datetime.now().strftime("%Y-%m-%d"), "Vessel": vessel, "Category": category, "Item": item, "Paid By": paid_by, "Amount": amount, "Expiry Date": expiry_date, "Receipt": receipt_status, "Entered By": st.session_state.user_role}])
         st.session_state.expenses = pd.concat([st.session_state.expenses, new_row], ignore_index=True)
@@ -270,13 +278,11 @@ else:
     def render_summary_and_edit():
         st.write(f"### Expenditures for {current_vessel}")
         
-        # 1. Search Bar
         search_query = st.text_input("🔍 Search Entries (e.g., 'transport')", key="search_bar")
         if st.session_state.prev_search != search_query:
             st.session_state.curr_page = 1
             st.session_state.prev_search = search_query
             
-        # 2. Filter Data based on Role
         if st.session_state.user_role == "Master":
             v_data = st.session_state.expenses[st.session_state.expenses["Vessel"] == current_vessel]
         elif st.session_state.user_role == "Assistant":
@@ -312,8 +318,13 @@ else:
         else:
             df_page = v_data
 
-        # Interactive Table
+        # Interactive Table - Mask the long Dropbox paths as "Yes" for a clean look
         df_display = df_page.copy()
+        def clean_receipt_status(x):
+            s = str(x)
+            if s in ["No", "nan", "None", ""]: return "No"
+            return "Yes"
+        df_display["Receipt"] = df_display["Receipt"].apply(clean_receipt_status)
         df_display.insert(0, "Select", False) 
         
         st.info("💡 Tick the top-left box to select all on this page. Tick individual rows to Edit, Delete, or Attach Bills.")
@@ -325,7 +336,7 @@ else:
             st.divider()
             st.write(f"### ⚙️ Actions for Selected ({len(selected_ids)} items)")
             
-            # --- EDIT LOGIC ---
+            # --- EDIT LOGIC (1 ITEM) ---
             if len(selected_ids) == 1:
                 edit_id = selected_ids[0]
                 row_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == edit_id].tolist()[0]
@@ -348,14 +359,33 @@ else:
                         upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
                         write_audit("EDIT", edit_id, f"Changed '{old_txt}' (₹{old_amt}) to '{new_item}' (₹{new_amt})")
                         st.success("Entry Updated!"); st.rerun()
+
+                # --- VIEW RECEIPT LOGIC ---
+                rcpt_val = str(row_data['Receipt'])
+                if rcpt_val not in ["No", "nan", "None", ""]:
+                    st.divider()
+                    st.write("#### 📄 Attached Receipt")
+                    if rcpt_val == "Yes":
+                        st.warning("This is a legacy receipt. Please check your Dropbox 'Receipts' folder manually to view it.")
+                    else:
+                        if st.button("Generate View/Download Link", key="btn_view_rcpt"):
+                            with st.spinner("Fetching secure link from Dropbox..."):
+                                link = get_temp_link(rcpt_val)
+                                if link:
+                                    st.success("Link generated successfully!")
+                                    st.markdown(f"### [👉 Click Here to Open/Download Receipt]({link})")
+                                else:
+                                    st.error("Could not fetch receipt link from Dropbox.")
             
+            # --- BULK RECEIPT UPLOAD ---
             st.write("#### 📎 Attach Receipt to Selected")
             bulk_receipt = st.file_uploader("Upload Bill (Applies to all selected)", type=["png", "jpg", "jpeg", "pdf"], key="bulk_rcpt")
             if st.button("Upload & Link Receipt", key="btn_link") and bulk_receipt:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                upload_binary(bulk_receipt.getvalue(), f"/Receipts/{current_vessel}/Bulk_{ts}.{bulk_receipt.name.split('.')[-1]}")
+                dbx_path = f"/Receipts/{current_vessel}/Bulk_{ts}.{bulk_receipt.name.split('.')[-1]}"
+                upload_binary(bulk_receipt.getvalue(), dbx_path)
                 for eid in selected_ids:
-                    st.session_state.expenses.at[st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0], 'Receipt'] = "Yes"
+                    st.session_state.expenses.at[st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0], 'Receipt'] = dbx_path
                 upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
                 write_audit("RECEIPT UPLOADED", str(selected_ids), "Attached receipt to selected rows.")
                 st.success("Receipt successfully linked!"); st.rerun()
