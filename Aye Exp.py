@@ -56,7 +56,6 @@ def upload_file(content, file_path):
     requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=content.encode('utf-8'))
 
 def upload_binary(file_obj, file_path):
-    # Streaming the file object directly avoids Out-Of-Memory (OOM) silent crashes for large PDFs!
     try:
         token = get_access_token()
         if not token: return False
@@ -67,9 +66,8 @@ def upload_binary(file_obj, file_path):
             "Dropbox-API-Arg": api_arg,
             "Content-Type": "application/octet-stream"
         }
-        file_obj.seek(0) # Ensure we read from the beginning of the file
+        file_obj.seek(0)
         res = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_obj, timeout=120)
-        
         if res.status_code == 200:
             return True
         else:
@@ -232,7 +230,7 @@ else:
                     upload_file(json.dumps(st.session_state.settings), SETTINGS_PATH)
                     st.success("✅ PINs updated securely!")
                 
-    st.sidebar.caption("Software Version: v2.3")
+    st.sidebar.caption("Software Version: v2.4")
 
     # --- MAIN APP TITLE ---
     st.title("⚓ Accounts")
@@ -415,68 +413,83 @@ else:
                                 time.sleep(1.5)
                                 st.rerun()
 
-                # View Receipt Logic
+                # View Multi-Receipt Logic
                 rcpt_val = str(row_data['Receipt'])
                 if rcpt_val not in ["No", "nan", "None", ""]:
-                    st.write("#### 📄 Attached Receipt")
+                    st.write("#### 📄 Attached Document(s)")
                     if rcpt_val == "Yes":
                         st.warning("This is an older 'legacy' receipt. Please re-upload the bill below to view it online.")
                     else:
-                        if st.button("👁️ Fetch Secure Receipt Link", key="btn_view_rcpt"):
-                            with st.spinner("Fetching secure link from Dropbox..."):
-                                link = get_temp_link(rcpt_val)
-                                if link:
-                                    ext = rcpt_val.split('.')[-1].lower()
-                                    if ext in ['png', 'jpg', 'jpeg']:
-                                        st.image(link, caption="Receipt Image")
-                                        st.markdown(f"**[👉 Click Here to Download Full Size Image]({link})**")
-                                    elif ext == 'pdf':
-                                        st.success("📄 PDF Document Ready!")
-                                        st.markdown(f'<a href="{link}" target="_blank" style="display: inline-block; padding: 10px 20px; background-color: #00ffcc; color: black; text-align: center; text-decoration: none; font-weight: bold; border-radius: 5px;">📄 Click Here to View/Download PDF</a>', unsafe_allow_html=True)
+                        if st.button("👁️ Fetch Secure Document Links", key="btn_view_rcpt"):
+                            with st.spinner("Fetching secure links from Dropbox..."):
+                                # Split by the pipe character in case there are multiple files attached!
+                                paths = rcpt_val.split('|')
+                                for i, path in enumerate(paths):
+                                    link = get_temp_link(path)
+                                    st.write(f"**Document {i+1}**")
+                                    if link:
+                                        ext = path.split('.')[-1].lower()
+                                        if ext in ['png', 'jpg', 'jpeg']:
+                                            st.image(link, caption=f"Image {i+1}")
+                                            st.markdown(f"**[👉 Download Image {i+1}]({link})**")
+                                        elif ext == 'pdf':
+                                            st.success(f"📄 PDF {i+1} Ready!")
+                                            st.markdown(f'<a href="{link}" target="_blank" style="display: inline-block; padding: 10px 20px; background-color: #00ffcc; color: black; text-align: center; text-decoration: none; font-weight: bold; border-radius: 5px; margin-bottom: 10px;">📄 View/Download PDF {i+1}</a>', unsafe_allow_html=True)
+                                        else:
+                                            st.markdown(f"**[👉 Download File {i+1}]({link})**")
                                     else:
-                                        st.markdown(f"**[👉 Click Here to Download File]({link})**")
-                                else:
-                                    st.error("Could not fetch receipt. It may have been deleted from Dropbox.")
+                                        st.error(f"Could not fetch document {i+1}. It may have been deleted from Dropbox.")
+                                st.divider()
             
-            # --- BULK RECEIPT UPLOAD ---
-            st.write("#### 📎 Attach Receipt to Selected")
-            bulk_receipt = st.file_uploader("Upload Bill (Applies to all selected)", type=["png", "jpg", "jpeg", "pdf"], key="bulk_rcpt")
-            if st.button("Upload & Link Receipt", key="btn_link") and bulk_receipt:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                ext = bulk_receipt.name.split('.')[-1].lower()
-                safe_vessel = re.sub(r'[^A-Za-z0-9]', '_', current_vessel)
-                dbx_path = f"/Receipts/{safe_vessel}/Bulk_{ts}.{ext}"
-                
-                with st.spinner("Uploading file securely to Dropbox. This may take a minute for PDFs..."):
-                    success = upload_binary(bulk_receipt, dbx_path)
+            # --- BULK MULTI-RECEIPT UPLOAD ---
+            with st.form("bulk_receipt_form", clear_on_submit=True):
+                st.write("#### 📎 Attach Additional Receipt to Selected")
+                bulk_receipt = st.file_uploader("Upload Bill (Applies to all selected)", type=["png", "jpg", "jpeg", "pdf"])
+                if st.form_submit_button("Upload & Link Receipt") and bulk_receipt:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    ext = bulk_receipt.name.split('.')[-1].lower()
+                    safe_vessel = re.sub(r'[^A-Za-z0-9]', '_', current_vessel)
+                    dbx_path = f"/Receipts/{safe_vessel}/Bulk_{ts}.{ext}"
                     
-                if success:
-                    for eid in selected_ids:
-                        st.session_state.expenses.at[st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0], 'Receipt'] = dbx_path
-                    upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
-                    write_audit("RECEIPT UPLOADED", str(selected_ids), "Attached receipt to selected rows.")
-                    st.success("✅ Receipt successfully linked!")
-                    time.sleep(1.5)
-                    st.rerun()
+                    with st.spinner("Uploading file securely to Dropbox. This may take a minute for PDFs..."):
+                        success = upload_binary(bulk_receipt, dbx_path)
+                        
+                    if success:
+                        for eid in selected_ids:
+                            r_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0]
+                            old_val = str(st.session_state.expenses.at[r_idx, 'Receipt'])
+                            # If it's a legacy or empty entry, just replace it
+                            if old_val in ["No", "nan", "None", "", "Yes"]:
+                                st.session_state.expenses.at[r_idx, 'Receipt'] = dbx_path
+                            else:
+                                # CHAIN IT TOGETHER! Append the new path with a pipe symbol separator
+                                st.session_state.expenses.at[r_idx, 'Receipt'] = old_val + "|" + dbx_path
+                                
+                        upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
+                        write_audit("RECEIPT UPLOADED", str(selected_ids), "Attached additional receipt to selected rows.")
+                        st.success("✅ Receipt successfully linked and added to the list!")
+                        time.sleep(1.5)
+                        st.rerun()
 
             # --- DELETE SELECTED ---
-            st.write("#### 🗑️️ Delete Selected")
-            if st.button("Delete Entries Entirely", type="primary", key="btn_del"):
-                rows_to_drop = []
-                for eid in selected_ids:
-                    r_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0]
-                    r_data = st.session_state.expenses.iloc[r_idx]
-                    st.session_state.wallets[r_data['Paid By']] += float(r_data['Amount']) 
-                    rows_to_drop.append(r_idx)
-                    write_audit("DELETE", eid, f"Deleted: '{r_data['Item']}' (₹{r_data['Amount']} paid by {r_data['Paid By']})")
-                
-                st.session_state.expenses = st.session_state.expenses.drop(rows_to_drop)
-                reshuffle_ids() 
-                upload_file(pd.DataFrame(list(st.session_state.wallets.items()), columns=["Person", "Balance"]).to_csv(index=False), WALLETS_PATH)
-                upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
-                st.error("Entries completely deleted, IDs reshuffled, and money refunded.")
-                time.sleep(2)
-                st.rerun()
+            with st.form("delete_form"):
+                st.write("#### 🗑 Delete Selected")
+                if st.form_submit_button("Delete Entries Entirely", type="primary"):
+                    rows_to_drop = []
+                    for eid in selected_ids:
+                        r_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0]
+                        r_data = st.session_state.expenses.iloc[r_idx]
+                        st.session_state.wallets[r_data['Paid By']] += float(r_data['Amount']) 
+                        rows_to_drop.append(r_idx)
+                        write_audit("DELETE", eid, f"Deleted: '{r_data['Item']}' (₹{r_data['Amount']} paid by {r_data['Paid By']})")
+                    
+                    st.session_state.expenses = st.session_state.expenses.drop(rows_to_drop)
+                    reshuffle_ids() 
+                    upload_file(pd.DataFrame(list(st.session_state.wallets.items()), columns=["Person", "Balance"]).to_csv(index=False), WALLETS_PATH)
+                    upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
+                    st.error("Entries completely deleted, IDs reshuffled, and money refunded.")
+                    time.sleep(2)
+                    st.rerun()
 
     # --- TAB LOGIC BASED ON ROLE ---
     if st.session_state.user_role == "Master":
@@ -493,8 +506,7 @@ else:
             b_paid = st.selectbox("Paid By", list(st.session_state.wallets.keys()), key="bp")
             receipt = st.file_uploader("Attach Bill", type=["png", "jpg", "jpeg", "pdf"], key="br")
             exp_str = st.date_input("Expiry Date").strftime("%Y-%m-%d") if st.checkbox("🔔 Set Expiry Date?") else None
-            if st.button("Save Billing", type="primary") and b_amt > 0 and act_item: 
-                save_expense(current_vessel, "Billings & Charges", act_item, b_paid, b_amt, exp_str, receipt)
+            if st.button("Save Billing", type="primary") and b_amt > 0 and act_item: save_expense(current_vessel, "Billings & Charges", act_item, b_paid, b_amt, exp_str, receipt)
             
             st.divider(); st.write(f"### 🚨 Active Alerts")
             with_exp = st.session_state.expenses[(st.session_state.expenses["Vessel"] == current_vessel) & (st.session_state.expenses["Expiry Date"].notna()) & (st.session_state.expenses["Expiry Date"] != "None") & (st.session_state.expenses["Expiry Date"] != "nan")]
