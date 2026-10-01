@@ -66,14 +66,14 @@ def upload_binary(file_bytes, file_path):
             "Dropbox-API-Arg": api_arg,
             "Content-Type": "application/octet-stream"
         }
-        res = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_bytes)
+        res = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_bytes, timeout=60)
         if res.status_code == 200:
             return True
         else:
-            st.error(f"Dropbox Error: Could not upload file. Ensure it is a valid format.")
+            st.error(f"Dropbox Error: Could not upload file. {res.text}")
             return False
     except Exception as e:
-        st.error("Upload Error: Connection interrupted.")
+        st.error(f"Upload Error: Connection interrupted. {str(e)}")
         return False
 
 def get_temp_link(file_path):
@@ -228,7 +228,7 @@ else:
                     upload_file(json.dumps(st.session_state.settings), SETTINGS_PATH)
                     st.success("✅ PINs updated securely!")
                 
-    st.sidebar.caption("Software Version: v2.1")
+    st.sidebar.caption("Software Version: v2.2")
 
     # --- MAIN APP TITLE ---
     st.title("⚓ Accounts")
@@ -295,13 +295,11 @@ else:
     def render_summary_and_edit():
         st.write(f"### Expenditures for {current_vessel}")
         
-        # 1. Search Bar
         search_query = st.text_input("🔍 Search Entries (e.g., 'transport')", key="search_bar")
         if st.session_state.prev_search != search_query:
             st.session_state.curr_page = 1
             st.session_state.prev_search = search_query
             
-        # 2. Filter Data based on Role
         if st.session_state.user_role == "Master":
             v_data = st.session_state.expenses[st.session_state.expenses["Vessel"] == current_vessel]
         elif st.session_state.user_role == "Assistant":
@@ -337,7 +335,6 @@ else:
         else:
             df_page = v_data
 
-        # Interactive Table - Mask the long Dropbox paths as "Yes" for a clean look
         df_display = df_page.copy()
         def clean_receipt_status(x):
             s = str(x)
@@ -361,14 +358,12 @@ else:
                 row_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == edit_id].tolist()[0]
                 row_data = st.session_state.expenses.iloc[row_idx]
                 
-                # Edit Content
-                c1, c2 = st.columns(2)
-                with c1: 
-                    new_item = st.text_input("Edit Description Text", value=str(row_data['Item']), key="ed_item")
-                    new_amt = st.number_input("Edit Amount (₹)", value=float(row_data['Amount']), key="ed_amt")
-                with c2:
-                    st.write(""); st.write("") 
-                    if st.button("💾 Update Entry Details", key="btn_upd"):
+                with st.form("edit_entry_form"):
+                    st.write("#### ✏️ Edit Entry Details")
+                    c1, c2 = st.columns(2)
+                    with c1: new_item = st.text_input("Edit Description Text", value=str(row_data['Item']))
+                    with c2: new_amt = st.number_input("Edit Amount (₹)", value=float(row_data['Amount']))
+                    if st.form_submit_button("💾 Update Entry"):
                         old_amt = float(row_data['Amount'])
                         old_txt = str(row_data['Item'])
                         st.session_state.wallets[row_data['Paid By']] += old_amt 
@@ -380,17 +375,14 @@ else:
                         write_audit("EDIT", edit_id, f"Changed '{old_txt}' (₹{old_amt}) to '{new_item}' (₹{new_amt})")
                         st.success("Entry Updated!"); st.rerun()
 
-                # Transfer / Duplicate Vessel (Master Only)
                 if st.session_state.user_role == "Master":
-                    st.write("#### 🔄 Transfer or Duplicate Entry")
-                    t_col1, t_col2 = st.columns(2)
-                    with t_col1: 
-                        target_vessel = st.selectbox("Select Target Vessel", st.session_state.vessels, key="target_vessel")
-                    with t_col2:
-                        st.write("")
-                        ca, cb = st.columns(2)
-                        with ca:
-                            if st.button("🚚 Move to Vessel", key="btn_move"):
+                    with st.form("transfer_form"):
+                        st.write("#### 🔄 Transfer or Duplicate Entry")
+                        t_col1, t_col2 = st.columns(2)
+                        with t_col1: target_vessel = st.selectbox("Target Vessel", st.session_state.vessels)
+                        with t_col2: action = st.radio("Action", ["Move to Vessel", "Duplicate Entry"], horizontal=True)
+                        if st.form_submit_button("Execute Action"):
+                            if action == "Move to Vessel":
                                 old_vessel = row_data['Vessel']
                                 if old_vessel != target_vessel:
                                     st.session_state.expenses.at[row_idx, 'Vessel'] = target_vessel
@@ -399,12 +391,10 @@ else:
                                     st.success(f"Successfully moved to {target_vessel}!"); st.rerun()
                                 else:
                                     st.warning("Entry is already in this vessel.")
-                        with cb:
-                            if st.button("📋 Duplicate Entry", key="btn_dup"):
+                            else:
                                 new_row = row_data.copy()
                                 new_row['Vessel'] = target_vessel
                                 new_row['ID'] = 0 
-                                # Deduct wallet for the duplicated expense
                                 st.session_state.wallets[new_row['Paid By']] -= float(new_row['Amount'])
                                 upload_file(pd.DataFrame(list(st.session_state.wallets.items()), columns=["Person", "Balance"]).to_csv(index=False), WALLETS_PATH)
                                 st.session_state.expenses = pd.concat([st.session_state.expenses, pd.DataFrame([new_row])], ignore_index=True)
@@ -416,13 +406,12 @@ else:
                 # View Receipt Logic
                 rcpt_val = str(row_data['Receipt'])
                 if rcpt_val not in ["No", "nan", "None", ""]:
-                    st.divider()
                     st.write("#### 📄 Attached Receipt")
                     if rcpt_val == "Yes":
-                        st.warning("This is an older 'legacy' receipt. The system only saved 'Yes' instead of the file name. To fix this, just re-upload the bill using the box below!")
+                        st.warning("This is an older 'legacy' receipt. Please re-upload the bill below to view it online.")
                     else:
-                        if st.button("👁️ View Attached Receipt", key="btn_view_rcpt"):
-                            with st.spinner("Fetching receipt from secure cloud..."):
+                        if st.button("👁️ Fetch Secure Receipt Link", key="btn_view_rcpt"):
+                            with st.spinner("Fetching secure link from Dropbox..."):
                                 link = get_temp_link(rcpt_val)
                                 if link:
                                     ext = rcpt_val.split('.')[-1].lower()
@@ -431,47 +420,50 @@ else:
                                         st.markdown(f"**[👉 Click Here to Download Full Size Image]({link})**")
                                     elif ext == 'pdf':
                                         st.success("📄 PDF Document Ready!")
-                                        st.markdown(f"### [👉 Click Here to View / Download PDF]({link})")
+                                        st.markdown(f'<a href="{link}" target="_blank" style="display: inline-block; padding: 10px 20px; background-color: #00ffcc; color: black; text-align: center; text-decoration: none; font-weight: bold; border-radius: 5px;">📄 Click Here to View/Download PDF</a>', unsafe_allow_html=True)
                                     else:
-                                        st.markdown(f"### [👉 Click Here to Download File]({link})")
+                                        st.markdown(f"**[👉 Click Here to Download File]({link})**")
                                 else:
                                     st.error("Could not fetch receipt. It may have been deleted from Dropbox.")
             
             # --- BULK RECEIPT UPLOAD ---
-            st.write("#### 📎 Attach Receipt to Selected")
-            bulk_receipt = st.file_uploader("Upload Bill (Applies to all selected)", type=["png", "jpg", "jpeg", "pdf"], key="bulk_rcpt")
-            if st.button("Upload & Link Receipt", key="btn_link") and bulk_receipt:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                ext = bulk_receipt.name.split('.')[-1].lower()
-                safe_vessel = re.sub(r'[^A-Za-z0-9]', '_', current_vessel)
-                dbx_path = f"/Receipts/{safe_vessel}/Bulk_{ts}.{ext}"
-                
-                with st.spinner("Uploading file securely to Dropbox..."):
-                    success = upload_binary(bulk_receipt.getvalue(), dbx_path)
+            with st.form("bulk_receipt_form", clear_on_submit=True):
+                st.write("#### 📎 Attach Receipt to Selected")
+                bulk_receipt = st.file_uploader("Upload Bill (Applies to all selected)", type=["png", "jpg", "jpeg", "pdf"])
+                if st.form_submit_button("Upload & Link Receipt") and bulk_receipt:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    ext = bulk_receipt.name.split('.')[-1].lower()
+                    safe_vessel = re.sub(r'[^A-Za-z0-9]', '_', current_vessel)
+                    dbx_path = f"/Receipts/{safe_vessel}/Bulk_{ts}.{ext}"
                     
-                if success:
-                    for eid in selected_ids:
-                        st.session_state.expenses.at[st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0], 'Receipt'] = dbx_path
-                    upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
-                    write_audit("RECEIPT UPLOADED", str(selected_ids), "Attached receipt to selected rows.")
-                    st.success("Receipt successfully linked!")
-                    st.rerun()
+                    with st.spinner("Uploading file securely to Dropbox..."):
+                        success = upload_binary(bulk_receipt.getvalue(), dbx_path)
+                        
+                    if success:
+                        for eid in selected_ids:
+                            st.session_state.expenses.at[st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0], 'Receipt'] = dbx_path
+                        upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
+                        write_audit("RECEIPT UPLOADED", str(selected_ids), "Attached receipt to selected rows.")
+                        st.success("Receipt successfully linked!")
+                        st.rerun()
 
-            st.write("#### 🗑️ Delete Selected")
-            if st.button("Delete Entries Entirely", type="primary", key="btn_del"):
-                rows_to_drop = []
-                for eid in selected_ids:
-                    r_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0]
-                    r_data = st.session_state.expenses.iloc[r_idx]
-                    st.session_state.wallets[r_data['Paid By']] += float(r_data['Amount']) 
-                    rows_to_drop.append(r_idx)
-                    write_audit("DELETE", eid, f"Deleted: '{r_data['Item']}' (₹{r_data['Amount']} paid by {r_data['Paid By']})")
-                
-                st.session_state.expenses = st.session_state.expenses.drop(rows_to_drop)
-                reshuffle_ids() 
-                upload_file(pd.DataFrame(list(st.session_state.wallets.items()), columns=["Person", "Balance"]).to_csv(index=False), WALLETS_PATH)
-                upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
-                st.error("Entries completely deleted, IDs reshuffled, and money refunded."); st.rerun()
+            # --- DELETE SELECTED ---
+            with st.form("delete_form"):
+                st.write("#### 🗑️ Delete Selected")
+                if st.form_submit_button("Delete Entries Entirely", type="primary"):
+                    rows_to_drop = []
+                    for eid in selected_ids:
+                        r_idx = st.session_state.expenses.index[st.session_state.expenses['ID'] == eid].tolist()[0]
+                        r_data = st.session_state.expenses.iloc[r_idx]
+                        st.session_state.wallets[r_data['Paid By']] += float(r_data['Amount']) 
+                        rows_to_drop.append(r_idx)
+                        write_audit("DELETE", eid, f"Deleted: '{r_data['Item']}' (₹{r_data['Amount']} paid by {r_data['Paid By']})")
+                    
+                    st.session_state.expenses = st.session_state.expenses.drop(rows_to_drop)
+                    reshuffle_ids() 
+                    upload_file(pd.DataFrame(list(st.session_state.wallets.items()), columns=["Person", "Balance"]).to_csv(index=False), WALLETS_PATH)
+                    upload_file(st.session_state.expenses.to_csv(index=False), EXPENSES_PATH)
+                    st.error("Entries completely deleted, IDs reshuffled, and money refunded."); st.rerun()
 
     # --- TAB LOGIC BASED ON ROLE ---
     if st.session_state.user_role == "Master":
@@ -496,7 +488,7 @@ else:
                 try:
                     dl = (datetime.strptime(str(row["Expiry Date"]), "%Y-%m-%d").date() - datetime.now().date()).days
                     if dl < 0: st.error(f"❌ **EXPIRED {-dl} days ago:** {row['Item']} - Expired {row['Expiry Date']}")
-                    elif dl <= 7: st.warning(f"⚠️ **DUE SOON ({dl} days):** {row['Item']} - Expires {row['Expiry Date']}")
+                    elif dl <= 7: st.warning(f"⚠️️ **DUE SOON ({dl} days):** {row['Item']} - Expires {row['Expiry Date']}")
                     else: st.success(f"✅ **Active ({dl} days left):** {row['Item']} - Expires {row['Expiry Date']}")
                 except: pass
 
